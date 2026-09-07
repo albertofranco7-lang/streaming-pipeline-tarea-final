@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Documento Tecnico - Pipeline Streaming End-to-End</title>
+<style>
+  body{font-family:Arial,sans-serif;max-width:920px;margin:40px auto;color:#222;line-height:1.65;font-size:14px}
+  h1{color:#0d47a1;border-bottom:3px solid #0d47a1;padding-bottom:8px;font-size:22px}
+  h2{color:#1565c0;border-bottom:1px solid #90caf9;padding-bottom:4px;margin-top:32px;font-size:17px}
+  h3{color:#1976d2;font-size:15px;margin-top:20px}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}
+  th{background:#0d47a1;color:#fff;padding:8px 12px;text-align:left}
+  td{border:1px solid #ccc;padding:6px 11px}
+  tr:nth-child(even) td{background:#f5f5f5}
+  pre{background:#1e1e1e;color:#d4d4d4;border-radius:6px;padding:16px;font-size:12px;overflow-x:auto;line-height:1.5}
+  code{background:#e3f2fd;color:#0d47a1;padding:1px 5px;border-radius:3px;font-size:13px}
+  .info{background:#e3f2fd;border-left:5px solid #0d47a1;padding:12px 18px;border-radius:4px;margin-bottom:24px}
+  .pass{color:#2e7d32;font-weight:bold}
+  .badge{background:#2e7d32;color:#fff;border-radius:4px;padding:2px 9px;font-size:12px}
+  @media print{body{margin:20px;font-size:12px}pre{font-size:10px}}
+</style>
+</head>
+<body>
+
+<div class="info">
+  <strong>Alumno:</strong> Jorge Alberto Franco Mora &nbsp;|&nbsp; <strong>CI:</strong> 3840694<br>
+  <strong>Institucion:</strong> Facultad Politecnica &mdash; Universidad Nacional de Asuncion (FPUNA)<br>
+  <strong>Maestria:</strong> Inteligencia Artificial y Analisis de Datos<br>
+  <strong>Modulo:</strong> 14 &mdash; Streaming de Datos y sus Aplicaciones &nbsp;|&nbsp; <strong>Agosto 2026</strong><br>
+  <strong>Repositorio:</strong> <a href="https://github.com/albertofranco7-lang/streaming-pipeline-tarea-final">github.com/albertofranco7-lang/streaming-pipeline-tarea-final</a>
+</div>
+
+<h1>Pipeline de Streaming End-to-End<br>
+<span style="font-size:0.65em;color:#555;font-weight:normal">Apache Kafka + Apache Beam &mdash; Transacciones Bancarias Sinteticas</span></h1>
+
+<h2>1. Introduccion</h2>
+<p>Este documento describe el diseno e implementacion de un pipeline de streaming <em>end-to-end</em> que procesa eventos de transacciones bancarias sinteticas. El sistema demuestra los conceptos fundamentales del procesamiento de streams en tiempo real:</p>
+<ul>
+  <li>Procesamiento basado en <strong>tiempo de evento</strong> (no de procesamiento)</li>
+  <li><strong>Ventanas fijas</strong> de 30 segundos</li>
+  <li><strong>Deduplicacion</strong> por identificador de evento</li>
+  <li>Manejo de <strong>eventos tardios y fuera de orden</strong></li>
+  <li><strong>Salida idempotente</strong> a archivos JSON</li>
+</ul>
+
+<h2>2. Stack Tecnologico</h2>
+<table>
+  <tr><th>Componente</th><th>Tecnologia</th><th>Version</th><th>Rol</th></tr>
+  <tr><td>Broker de mensajes</td><td>Apache Kafka</td><td>3.6 (Confluent 7.6.1)</td><td>Transporte de eventos</td></tr>
+  <tr><td>Coordinador</td><td>Apache Zookeeper</td><td>Confluent 7.6.1</td><td>Coordinacion Kafka</td></tr>
+  <tr><td>Motor de procesamiento</td><td>Apache Beam</td><td>2.59.0</td><td>Pipeline de transformacion</td></tr>
+  <tr><td>Runner</td><td>DirectRunner</td><td>&mdash;</td><td>Ejecucion local</td></tr>
+  <tr><td>Productor</td><td>Python + kafka-python-ng</td><td>3.12 / 2.2.3</td><td>Generacion de eventos</td></tr>
+  <tr><td>Infraestructura</td><td>Docker Compose</td><td>v5.2.0</td><td>Orquestacion de contenedores</td></tr>
+  <tr><td>Monitoreo</td><td>Kafka UI</td><td>latest</td><td>Visualizacion del broker</td></tr>
+  <tr><td>Pruebas</td><td>pytest</td><td>8.3.2</td><td>Pruebas unitarias</td></tr>
+</table>
+
+<h2>3. Diagrama de Arquitectura</h2>
+<pre>
++------------------------------------------------------------------+
+|  CAPA 1: GENERACION DE EVENTOS                                   |
+|                                                                  |
+|  producer/producer.py                                            |
+|  +------------------------------------------------------------+  |
+|  | - 100 eventos normales  (account_id, amount, currency)     |  |
+|  | - 17 duplicados (15%): mismo event_id, re-enviado          |  |
+|  | - 10 tardios   (10%): event_time 45s en el pasado          |  |
+|  | Total: 127 mensajes enviados al broker                      |  |
+|  |                                                             |  |
+|  | Formato JSON:                                               |  |
+|  | { event_id, account_id, amount, currency,                   |  |
+|  |   event_time (ISO-8601 UTC), send_time, event_type }        |  |
+|  +------------------------------------------------------------+  |
++------------------------------|-----------------------------------+
+                               | kafka-python-ng | key = event_id
+                               v
++------------------------------------------------------------------+
+|  CAPA 2: TRANSPORTE - APACHE KAFKA                               |
+|                                                                  |
+|  Topico: transactions                                            |
+|  Particiones: 1  |  Replicacion: 1  |  Retencion: 1 hora        |
+|  Docker: confluentinc/cp-kafka:7.6.1                            |
+|  Kafka UI: http://localhost:8080                                 |
++------------------------------|-----------------------------------+
+                               | Consumer (group_id=None, offset=earliest)
+                               v
++------------------------------------------------------------------+
+|  CAPA 3: PROCESAMIENTO - APACHE BEAM (DirectRunner)              |
+|                                                                  |
+|  Paso 1: ParseAndTimestamp                                       |
+|    - Deserializa JSON del mensaje                                |
+|    - event_time  -->  timestamp de Beam (tiempo de evento)       |
+|    - Descarta mensajes malformados                               |
+|                                                                  |
+|  Paso 2: WindowInto( FixedWindows(30s) )                         |
+|    - Ventanas de 30 segundos sobre event_time                    |
+|    - Trigger: AfterWatermark                                     |
+|    - Late trigger: Repeatedly(AfterProcessingTime(5s))           |
+|    - allowed_lateness = 60 segundos                              |
+|    - AccumulationMode: DISCARDING                                |
+|                                                                  |
+|  Paso 3: DeduplicateByEventId                                    |
+|    - Set de event_ids vistos por bundle                          |
+|    - 17 duplicados eliminados en la ejecucion end-to-end         |
+|                                                                  |
+|  Paso 4: Map( account_id --> record )                            |
+|    - Extrae la clave de agrupacion                               |
+|                                                                  |
+|  Paso 5: CombinePerKey( SumTransactionsCombiner )                |
+|    - total_amount: suma de montos deduplicados                   |
+|    - tx_count: conteo de transacciones unicas                    |
+|    - currencies: conjunto de monedas presentes                   |
+|                                                                  |
+|  Paso 6: FormatWindowedResult                                    |
+|    - Agrega window_start y window_end al resultado               |
+|                                                                  |
+|  Paso 7: WriteIdempotentJson                                     |
+|    - filename = md5( window_start + account_id )[:10]            |
+|    - Re-ejecucion produce mismos archivos (idempotente)          |
++------------------------------|-----------------------------------+
+                               | 38 archivos JSON
+                               v
++------------------------------------------------------------------+
+|  CAPA 4: ALMACENAMIENTO - output/result_*.json                   |
+|                                                                  |
+|  Ejemplo de resultado:                                           |
+|  {                                                               |
+|    "window_start": "2026-08-16T04:59:30+00:00",                  |
+|    "window_end":   "2026-08-16T05:00:00+00:00",                  |
+|    "account_id":   "ACC_006",                                    |
+|    "total_amount": 17169268.34,                                  |
+|    "tx_count":     5,                                            |
+|    "currencies":   ["USD", "PYG", "BRL"]                         |
+|  }                                                               |
++------------------------------------------------------------------+
+</pre>
+
+<h2>4. Modelo de Datos</h2>
+
+<h3>4.1 Evento de Entrada (Kafka)</h3>
+<table>
+  <tr><th>Campo</th><th>Tipo</th><th>Descripcion</th></tr>
+  <tr><td><code>event_id</code></td><td>UUID4</td><td>Identificador unico de negocio. Clave de deduplicacion.</td></tr>
+  <tr><td><code>account_id</code></td><td>string</td><td>Cuenta bancaria: ACC_001 ... ACC_010</td></tr>
+  <tr><td><code>amount</code></td><td>float</td><td>Monto de la transaccion (rango: 1.000 - 5.000.000)</td></tr>
+  <tr><td><code>currency</code></td><td>string</td><td>Moneda: PYG, USD o BRL</td></tr>
+  <tr><td><code>event_time</code></td><td>ISO-8601 UTC</td><td><strong>Tiempo de evento</strong>. Usado como timestamp de Beam.</td></tr>
+  <tr><td><code>send_time</code></td><td>ISO-8601 UTC</td><td>Tiempo de envio real al broker (puede ser posterior).</td></tr>
+  <tr><td><code>event_type</code></td><td>enum</td><td>"normal" | "duplicate" | "late"</td></tr>
+</table>
+
+<h3>4.2 Resultado de Salida (JSON por ventana)</h3>
+<table>
+  <tr><th>Campo</th><th>Tipo</th><th>Descripcion</th></tr>
+  <tr><td><code>window_start</code></td><td>ISO-8601 UTC</td><td>Inicio de la ventana de 30 segundos</td></tr>
+  <tr><td><code>window_end</code></td><td>ISO-8601 UTC</td><td>Fin de la ventana de 30 segundos</td></tr>
+  <tr><td><code>account_id</code></td><td>string</td><td>Cuenta bancaria agrupada</td></tr>
+  <tr><td><code>total_amount</code></td><td>float</td><td>Suma de montos (duplicados ya eliminados)</td></tr>
+  <tr><td><code>tx_count</code></td><td>int</td><td>Cantidad de transacciones unicas en la ventana</td></tr>
+  <tr><td><code>currencies</code></td><td>list[string]</td><td>Monedas presentes en la ventana</td></tr>
+</table>
+
+<h2>5. Decisiones de Diseno</h2>
+
+<h3>5.1 Tiempo de evento vs. tiempo de procesamiento</h3>
+<p>El campo <code>event_time</code> del payload se extrae y se asigna como timestamp de Beam via <code>TimestampedValue</code>. Esto garantiza que eventos tardios sean asignados a la ventana correcta de negocio, independientemente de cuando lleguen al broker. Sin esta decision, los eventos tardios se agruparian en la ventana del momento de llegada, produciendo resultados incorrectos.</p>
+
+<h3>5.2 Ventanas fijas de 30 segundos</h3>
+<p><code>FixedWindows(30)</code> agrupa eventos en segmentos de 30 segundos. Cada segmento produce resultados independientes por cuenta. Representa el patron tipico de micro-batching en pipelines de fraude o reporting en tiempo real.</p>
+
+<h3>5.3 Latencia permitida (allowed_lateness = 60s)</h3>
+<p>Acepta eventos hasta 60 segundos despues del cierre de la ventana. El trigger tardio <code>Repeatedly(AfterProcessingTime(5s))</code> re-dispara cada 5 segundos mientras sigan llegando eventos tardios. Modo <code>DISCARDING</code>: cada trigger produce solo los nuevos datos, sin acumular.</p>
+
+<h3>5.4 Deduplicacion por event_id</h3>
+<p><code>DeduplicateByEventId</code> mantiene un <code>set</code> de <code>event_id</code> por bundle. En la ejecucion real se eliminaron 17 duplicados de 127 mensajes (13%). Para runners distribuidos como Flink o Dataflow, se reemplazaria con <code>beam.Distinct()</code> o la State API.</p>
+
+<h3>5.5 Salida idempotente</h3>
+<p>Cada archivo se nombra <code>result_&lt;md5(window_start + account_id)[:10]&gt;.json</code>. Re-ejecutar el pipeline con los mismos datos produce exactamente los mismos archivos con el mismo contenido, sin duplicacion en disco.</p>
+
+<h3>5.6 DirectRunner</h3>
+<p>Se uso el runner local para facilitar la demostracion sin infraestructura adicional. El codigo es compatible con Apache Flink o Google Cloud Dataflow cambiando unicamente la configuracion del runner en <code>PipelineOptions</code>.</p>
+
+<h2>6. Estructura del Repositorio</h2>
+<pre>
+streaming-pipeline-tarea-final/
+├── docker-compose.yml          # Kafka + Zookeeper + Kafka-UI
+├── README.md                   # Guia de instalacion y ejecucion
+├── .gitignore
+├── docs/
+│   ├── arquitectura.md         # Documento tecnico (Markdown)
+│   └── documento_tecnico.html  # Este documento (para PDF)
+├── producer/
+│   ├── producer.py             # Generador de eventos sinteticos
+│   └── requirements.txt
+├── pipeline/
+│   ├── beam_pipeline.py        # Pipeline Beam completo
+│   └── requirements.txt
+├── tests/
+│   ├── test_pipeline.py        # 6 pruebas unitarias
+│   ├── generate_test_data.py   # Generador de datos de prueba
+│   └── requirements.txt
+├── evidencia/
+│   ├── producer_run.log        # Log del productor
+│   ├── pipeline_kafka_run.log  # Log del pipeline con datos Kafka
+│   ├── pipeline_run.log        # Log del pipeline offline
+│   └── sample_output/          # 5 archivos JSON de resultado
+└── output/
+    └── .gitkeep
+</pre>
+
+<h2>7. Instrucciones de Reproduccion</h2>
+<pre>
+# 1. Clonar el repositorio
+git clone https://github.com/albertofranco7-lang/streaming-pipeline-tarea-final.git
+cd streaming-pipeline-tarea-final
+
+# 2. Instalar dependencias Python
+pip install kafka-python-ng==2.2.3 apache-beam==2.59.0 pytest==8.3.2
+
+# 3. Levantar Kafka con Docker
+docker compose up -d
+# Esperar ~20 segundos
+# Verificar en: http://localhost:8080
+
+# 4. Modo offline (sin Kafka) - prueba rapida
+python tests/generate_test_data.py
+python pipeline/beam_pipeline.py --offline --input output/test_events.jsonl
+
+# 5. Pruebas unitarias
+pytest tests/test_pipeline.py -v
+
+# 6. End-to-end con Kafka real
+# Terminal 1 - Productor:
+python producer/producer.py
+# Terminal 2 - Consumir de Kafka y procesar:
+# (ver README para detalle completo)
+</pre>
+
+<h2>8. Referencias</h2>
+<ul>
+  <li>Apache Beam Python SDK &mdash; <a href="https://beam.apache.org/documentation/sdks/python/">beam.apache.org</a></li>
+  <li>Apache Kafka Documentation &mdash; <a href="https://kafka.apache.org/documentation/">kafka.apache.org</a></li>
+  <li>The Dataflow Model &mdash; Akidau et al., VLDB 2015</li>
+  <li>Streaming Systems &mdash; Akidau, Chernyak, Lax &mdash; O'Reilly 2018</li>
+  <li>Confluent Platform Docker Images &mdash; <a href="https://hub.docker.com/u/confluentinc">hub.docker.com/u/confluentinc</a></li>
+</ul>
+
+<hr style="margin-top:40px">
+<p style="text-align:center;color:#888;font-size:12px">
+  Jorge Alberto Franco Mora &mdash; CI: 3840694 &mdash; FPUNA &mdash; Modulo 14 &mdash; Tarea Final &mdash; Agosto 2026
+</p>
+</body>
+</html>
