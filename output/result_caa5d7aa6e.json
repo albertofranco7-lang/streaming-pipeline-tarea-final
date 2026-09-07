@@ -1,0 +1,11 @@
+{
+  "window_start": "2026-08-16T04:59:30+00:00",
+  "window_end": "2026-08-16T05:00:00+00:00",
+  "account_id": "ACC_009",
+  "total_amount": 4850671.47,
+  "tx_count": 2,
+  "currencies": [
+    "USD",
+    "BRL"
+  ]
+}
