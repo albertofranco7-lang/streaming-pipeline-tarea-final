@@ -97,8 +97,8 @@ class FormatWindowedResult(beam.DoFn):
     def process(self, element, window=beam.DoFn.WindowParam, *args, **kwargs):
         key, aggregated = element
         account_id = key
-        win_start = datetime.fromtimestamp(window.start, tz=timezone.utc).isoformat()
-        win_end   = datetime.fromtimestamp(window.end,   tz=timezone.utc).isoformat()
+        win_start = datetime.fromtimestamp(float(window.start), tz=timezone.utc).isoformat()
+        win_end   = datetime.fromtimestamp(float(window.end),   tz=timezone.utc).isoformat()
         result = {
             "window_start": win_start,
             "window_end":   win_end,
